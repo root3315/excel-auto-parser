@@ -1,0 +1,696 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Excel Smart Parser</title>
+    <style>
+        *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+        :root {
+            --bg: #0d1117;
+            --bg-secondary: #161b22;
+            --surface: #1c2128;
+            --border: #30363d;
+            --border-light: #3d444d;
+            --text: #e6edf3;
+            --text-secondary: #8b949e;
+            --text-muted: #6e7681;
+            --accent: #58a6ff;
+            --accent-bg: rgba(88,166,255,.08);
+            --accent-border: rgba(88,166,255,.2);
+            --accent-hover: #79b8ff;
+            --green: #3fb950;
+            --green-bg: rgba(63,185,80,.08);
+            --green-border: rgba(63,185,80,.2);
+            --orange: #d29922;
+            --orange-bg: rgba(210,153,34,.08);
+            --purple: #bc8cff;
+            --purple-bg: rgba(188,140,255,.08);
+            --row-hover: rgba(88,166,255,.04);
+            --row-stripe: rgba(255,255,255,.01);
+            --shadow-sm: 0 1px 2px rgba(0,0,0,.3);
+            --shadow-md: 0 4px 12px rgba(0,0,0,.4);
+            --shadow-lg: 0 10px 30px rgba(0,0,0,.5);
+            --radius: 12px;
+            --radius-sm: 8px;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.5;
+            min-height: 100vh;
+        }
+
+        /* ─── Top bar ─────────────────────────────────────────── */
+        .topbar {
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            background: rgba(13,17,23,.85);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border-bottom: 1px solid var(--border);
+            padding: 0 32px;
+            height: 56px;
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 15px;
+            font-weight: 700;
+            letter-spacing: -.02em;
+            color: var(--text);
+            white-space: nowrap;
+        }
+        .logo svg { flex-shrink: 0; }
+
+        .upload-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 7px 16px;
+            font-size: 13px;
+            font-weight: 500;
+            color: #fff;
+            background: var(--accent);
+            border: none;
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+            transition: background .15s, box-shadow .15s;
+            white-space: nowrap;
+        }
+        .upload-btn:hover {
+            background: var(--accent-hover);
+            box-shadow: 0 2px 8px rgba(88,166,255,.3);
+        }
+        .upload-btn input { display: none; }
+
+        .topbar-spacer { flex: 1; }
+
+        .topbar-stats {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+        .topbar-stat {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            font-size: 12px;
+            color: var(--text-secondary);
+            padding: 4px 10px;
+            background: var(--bg-secondary);
+            border-radius: 20px;
+            border: 1px solid var(--border);
+        }
+        .topbar-stat strong {
+            font-weight: 600;
+            color: var(--text);
+        }
+
+        /* ─── Upload screen ───────────────────────────────────── */
+        .upload-screen {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: calc(100vh - 56px);
+            padding: 32px;
+        }
+
+        .upload-card {
+            width: 100%;
+            max-width: 520px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            box-shadow: var(--shadow-lg);
+            padding: 48px 40px;
+            text-align: center;
+        }
+
+        .upload-icon {
+            width: 64px;
+            height: 64px;
+            margin: 0 auto 24px;
+            border-radius: 16px;
+            background: var(--accent-bg);
+            border: 1px solid var(--accent-border);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .upload-card h2 {
+            font-size: 18px;
+            font-weight: 600;
+            margin-bottom: 6px;
+            letter-spacing: -.01em;
+        }
+        .upload-card p {
+            font-size: 14px;
+            color: var(--text-secondary);
+            margin-bottom: 28px;
+        }
+
+        .drop-zone {
+            border: 2px dashed var(--border);
+            border-radius: var(--radius-sm);
+            padding: 36px 24px;
+            cursor: pointer;
+            transition: all .2s;
+            position: relative;
+        }
+        .drop-zone:hover,
+        .drop-zone.drag-over {
+            border-color: var(--accent);
+            background: var(--accent-bg);
+        }
+        .drop-zone.drag-over { transform: scale(1.01); }
+        .drop-zone p { margin: 0; }
+        .drop-zone .hint {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-top: 8px;
+        }
+        .drop-zone input { display: none; }
+
+        .features {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            margin-top: 28px;
+        }
+        .feature {
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            text-align: left;
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+        .feature svg { flex-shrink: 0; margin-top: 1px; }
+        .feature strong { color: var(--text); display: block; font-size: 13px; }
+
+        /* ─── Data view ───────────────────────────────────────── */
+        .data-view { display: none; }
+        .data-view.active { display: block; }
+
+        /* Controls bar */
+        .ctrl-bar {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 14px 32px;
+            border-bottom: 1px solid var(--border);
+            background: var(--surface);
+            flex-wrap: wrap;
+        }
+
+        .tabs {
+            display: flex;
+            gap: 2px;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: 3px;
+        }
+        .tab {
+            padding: 6px 14px;
+            border-radius: 6px;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            border: none;
+            background: transparent;
+            color: var(--text-secondary);
+            transition: all .15s;
+            white-space: nowrap;
+        }
+        .tab:hover { color: var(--text); }
+        .tab.active {
+            background: var(--surface);
+            color: var(--text);
+            box-shadow: var(--shadow-sm);
+        }
+
+        .search-wrap {
+            flex: 1;
+            min-width: 200px;
+            position: relative;
+        }
+        .search-wrap svg {
+            position: absolute;
+            left: 12px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: var(--text-secondary);
+            pointer-events: none;
+        }
+        .search-wrap input {
+            width: 100%;
+            padding: 7px 14px 7px 36px;
+            font-size: 13px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            background: var(--bg);
+            color: var(--text);
+            outline: none;
+            transition: border-color .2s, box-shadow .2s;
+        }
+        .search-wrap input:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px rgba(88,166,255,.15);
+        }
+        .search-wrap input::placeholder { color: var(--text-muted); }
+
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 5px 12px;
+            font-size: 12px;
+            font-weight: 500;
+            border-radius: 20px;
+            white-space: nowrap;
+        }
+        .badge-default {
+            background: var(--bg-secondary);
+            color: var(--text-secondary);
+            border: 1px solid var(--border);
+        }
+        .badge-match {
+            background: var(--accent-bg);
+            color: var(--accent);
+            border: 1px solid var(--accent-border);
+        }
+
+        /* ─── Table ───────────────────────────────────────────── */
+        .table-wrap {
+            overflow: auto;
+            max-height: calc(100vh - 130px);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+
+        thead { position: sticky; top: 0; z-index: 10; }
+
+        th {
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            padding: 10px 16px;
+            text-align: left;
+            font-weight: 600;
+            font-size: 11px;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: .04em;
+            white-space: nowrap;
+            cursor: pointer;
+            user-select: none;
+            transition: color .15s;
+            position: relative;
+        }
+        th:first-child { padding-left: 24px; }
+        th:hover { color: var(--accent); }
+        th::after {
+            content: '';
+            position: absolute;
+            right: 0;
+            top: 25%;
+            height: 50%;
+            width: 1px;
+            background: var(--border);
+        }
+        th:last-child::after { display: none; }
+
+        .th-inner {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .sort-arrow {
+            display: inline-flex;
+            font-size: 9px;
+            opacity: .4;
+            transition: opacity .15s;
+            color: var(--accent);
+        }
+        th.sorted .sort-arrow { opacity: 1; }
+
+        tbody tr {
+            border-bottom: 1px solid var(--border);
+            transition: background .1s;
+        }
+        tbody tr:nth-child(even) { background: var(--row-stripe); }
+        tbody tr:hover { background: var(--row-hover); }
+
+        td {
+            padding: 9px 16px;
+            white-space: nowrap;
+            max-width: 280px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        td:first-child {
+            padding-left: 24px;
+            font-weight: 500;
+        }
+        td.num {
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+        }
+
+        mark {
+            background: rgba(210,153,34,.25);
+            color: var(--text);
+            border-radius: 2px;
+            padding: 0 2px;
+        }
+
+        /* empty */
+        .empty-state {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 80px 20px;
+            color: var(--text-secondary);
+        }
+        .empty-state svg { margin-bottom: 16px; opacity: .4; }
+        .empty-state p { font-size: 15px; }
+
+        /* scrollbar */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: var(--border-light); border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+        /* responsive */
+        @media (max-width: 640px) {
+            .topbar { padding: 0 16px; }
+            .ctrl-bar { padding: 10px 16px; }
+            .topbar-stats { display: none; }
+            .features { grid-template-columns: 1fr; }
+            .upload-card { padding: 32px 24px; }
+        }
+    </style>
+</head>
+<body>
+
+<!-- Top bar -->
+<div class="topbar">
+    <div class="logo">
+        <svg width="22" height="22" fill="none" viewBox="0 0 24 24">
+            <rect x="3" y="3" width="7" height="7" rx="1.5" fill="#58a6ff"/>
+            <rect x="14" y="3" width="7" height="7" rx="1.5" fill="#58a6ff" opacity=".4"/>
+            <rect x="3" y="14" width="7" height="7" rx="1.5" fill="#58a6ff" opacity=".4"/>
+            <rect x="14" y="14" width="7" height="7" rx="1.5" fill="#58a6ff" opacity=".2"/>
+        </svg>
+        Excel Parser
+    </div>
+
+    <label class="upload-btn" id="uploadBtn">
+        <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        Загрузить
+        <input type="file" id="fileInput" accept=".json">
+    </label>
+
+    <div class="topbar-spacer"></div>
+
+    <div class="topbar-stats" id="statsBar" style="display:none;">
+        <div class="topbar-stat">Файл: <strong id="statFile">—</strong></div>
+        <div class="topbar-stat">Таблиц: <strong id="statTables">—</strong></div>
+        <div class="topbar-stat">Строк: <strong id="statRows">—</strong></div>
+    </div>
+</div>
+
+<!-- Upload screen -->
+<div class="upload-screen" id="uploadScreen">
+    <div class="upload-card">
+        <div class="upload-icon">
+            <svg width="28" height="28" fill="none" viewBox="0 0 24 24">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z" stroke="#58a6ff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                <polyline points="14 2 14 8 20 8" stroke="#58a6ff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+        </div>
+        <h2>Загрузите JSON-файл</h2>
+        <p>Результат парсинга Excel для просмотра</p>
+
+        <div class="drop-zone" id="dropZone">
+            <svg width="32" height="32" fill="none" viewBox="0 0 24 24" style="display:block;margin:0 auto 12px;opacity:.4">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" stroke="#8b949e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                <polyline points="17 8 12 3 7 8" stroke="#8b949e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                <line x1="12" y1="3" x2="12" y2="15" stroke="#8b949e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <p><strong style="color:var(--text)">Перетащите файл сюда</strong></p>
+            <p class="hint">или нажмите для выбора</p>
+            <input type="file" id="dropInput" accept=".json">
+        </div>
+
+        <div class="features">
+            <div class="feature">
+                <svg width="14" height="14" fill="none" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5" stroke="#3fb950" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                <div><strong>Поиск</strong>по всем столбцам</div>
+            </div>
+            <div class="feature">
+                <svg width="14" height="14" fill="none" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5" stroke="#3fb950" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                <div><strong>Сортировка</strong>клик по заголовку</div>
+            </div>
+            <div class="feature">
+                <svg width="14" height="14" fill="none" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5" stroke="#3fb950" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                <div><strong>Вкладки</strong>переключение таблиц</div>
+            </div>
+            <div class="feature">
+                <svg width="14" height="14" fill="none" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5" stroke="#3fb950" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                <div><strong>Без сервера</strong>всё в браузере</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Data view -->
+<div class="data-view" id="dataView">
+    <div class="ctrl-bar">
+        <div class="tabs" id="tabBar"></div>
+        <div class="search-wrap">
+            <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <input type="text" id="searchInput" placeholder="Поиск по всем столбцам…">
+        </div>
+        <span class="badge badge-default" id="rowCount"></span>
+    </div>
+
+    <div class="table-wrap" id="tableWrap">
+        <table>
+            <thead id="thead"></thead>
+            <tbody id="tbody"></tbody>
+        </table>
+    </div>
+
+    <div class="empty-state" id="noResults" style="display:none;">
+        <svg width="40" height="40" fill="none" viewBox="0 0 24 24">
+            <circle cx="11" cy="11" r="8" stroke="#6e7681" stroke-width="1.5"/>
+            <line x1="21" y1="21" x2="16.65" y2="16.65" stroke="#6e7681" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        <p>Ничего не найдено</p>
+    </div>
+</div>
+
+<script>
+/* ── State ─────────────────────────────────────────────── */
+let data = null;
+let curTable = 0;
+let sort = { col: null, asc: true };
+let query = '';
+
+/* ── DOM ───────────────────────────────────────────────── */
+const $ = id => document.getElementById(id);
+const fileInput   = $('fileInput');
+const dropInput   = $('dropInput');
+const dropZone    = $('dropZone');
+const uploadBtn   = $('uploadBtn');
+const uploadScreen= $('uploadScreen');
+const dataView    = $('dataView');
+const statsBar    = $('statsBar');
+const tabBar      = $('tabBar');
+const searchInput = $('searchInput');
+const rowCount    = $('rowCount');
+const thead       = $('thead');
+const tbody       = $('tbody');
+const tableWrap   = $('tableWrap');
+const noResults   = $('noResults');
+
+/* ── Upload ────────────────────────────────────────────── */
+/* Fix: programmatically trigger the hidden input */
+dropZone.addEventListener('click', () => dropInput.click());
+uploadBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    fileInput.click();
+});
+
+fileInput.addEventListener('change', e => { if (e.target.files[0]) read(e.target.files[0]); });
+dropInput.addEventListener('change', e => { if (e.target.files[0]) read(e.target.files[0]); });
+
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', e => { e.preventDefault(); dropZone.classList.remove('drag-over'); if (e.dataTransfer.files[0]) read(e.dataTransfer.files[0]); });
+
+/* Allow drop on entire page */
+document.body.addEventListener('dragover', e => e.preventDefault());
+document.body.addEventListener('drop', e => {
+    e.preventDefault();
+    if (e.dataTransfer.files[0] && e.dataTransfer.files[0].name.endsWith('.json')) read(e.dataTransfer.files[0]);
+});
+
+function read(file) {
+    const r = new FileReader();
+    r.onload = e => {
+        try { data = JSON.parse(e.target.result); boot(); }
+        catch (err) { alert('Bad JSON: ' + err.message); }
+    };
+    r.readAsText(file);
+}
+
+/* ── Boot ──────────────────────────────────────────────── */
+function boot() {
+    uploadScreen.style.display = 'none';
+    dataView.classList.add('active');
+    statsBar.style.display = 'flex';
+
+    $('statFile').textContent = data.file || '—';
+    $('statTables').textContent = data.tables || 0;
+    $('statRows').textContent = (data.total_rows || 0).toLocaleString('ru-RU');
+
+    buildTabs();
+    switchTable(0);
+}
+
+/* ── Tabs ──────────────────────────────────────────────── */
+function buildTabs() {
+    tabBar.innerHTML = '';
+    data.tables_data.forEach((t, i) => {
+        const b = document.createElement('button');
+        b.className = 'tab' + (i === 0 ? ' active' : '');
+        b.textContent = t.name || t.sheet || `Таблица ${i+1}`;
+        b.onclick = () => switchTable(i);
+        tabBar.appendChild(b);
+    });
+}
+
+function switchTable(i) {
+    curTable = i; sort = { col: null, asc: true }; query = ''; searchInput.value = '';
+    tabBar.querySelectorAll('.tab').forEach((t,j) => t.classList.toggle('active', j===i));
+    render();
+}
+
+/* ── Render ────────────────────────────────────────────── */
+function render() {
+    const tbl = data.tables_data[curTable];
+    const cols = tbl.columns;
+
+    thead.innerHTML = '<tr>' + cols.map((c,i) => {
+        const sorted = sort.col === i ? ' sorted' : '';
+        const arrow = sort.col === i ? (sort.asc ? '▲' : '▼') : '⇅';
+        return `<th data-i="${i}" class="${sorted}"><span class="th-inner">${esc(c.name)}<span class="sort-arrow">${arrow}</span></span></th>`;
+    }).join('') + '</tr>';
+
+    thead.querySelectorAll('th').forEach(th => {
+        th.onclick = () => {
+            const i = parseInt(th.dataset.i);
+            if (sort.col === i) sort.asc = !sort.asc;
+            else { sort.col = i; sort.asc = true; }
+            renderRows();
+        };
+    });
+
+    renderRows();
+}
+
+function renderRows() {
+    const tbl = data.tables_data[curTable];
+    const cols = tbl.columns;
+    let rows = [...tbl.rows];
+
+    if (query) {
+        const q = query.toLowerCase();
+        rows = rows.filter(r => cols.some(c => { const v = r[c.name]; return v != null && String(v).toLowerCase().includes(q); }));
+    }
+
+    if (sort.col !== null) {
+        const key = cols[sort.col].name;
+        const num = cols[sort.col].type === 'number';
+        rows.sort((a,b) => {
+            let va = a[key], vb = b[key];
+            if (va == null) return 1;
+            if (vb == null) return -1;
+            if (num && typeof va === 'number' && typeof vb === 'number') return sort.asc ? va - vb : vb - va;
+            va = String(va).toLowerCase(); vb = String(vb).toLowerCase();
+            if (va < vb) return sort.asc ? -1 : 1;
+            if (va > vb) return sort.asc ? 1 : -1;
+            return 0;
+        });
+    }
+
+    thead.querySelectorAll('th').forEach((th,i) => {
+        const arrow = th.querySelector('.sort-arrow');
+        if (i === sort.col) { th.classList.add('sorted'); arrow.textContent = sort.asc ? '▲' : '▼'; }
+        else { th.classList.remove('sorted'); arrow.textContent = '⇅'; }
+    });
+
+    const total = tbl.rows.length;
+    if (query) {
+        rowCount.className = 'badge badge-match';
+        rowCount.textContent = `${rows.length} из ${total}`;
+    } else {
+        rowCount.className = 'badge badge-default';
+        rowCount.textContent = `${rows.length} строк`;
+    }
+
+    if (!rows.length) { tableWrap.style.display = 'none'; noResults.style.display = 'flex'; return; }
+    noResults.style.display = 'none'; tableWrap.style.display = 'block';
+
+    const MAX = 2000;
+    const show = rows.slice(0, MAX);
+    const numSet = new Set();
+    cols.forEach((c,i) => { if (c.type === 'number') numSet.add(i); });
+
+    tbody.innerHTML = show.map(r =>
+        '<tr>' + cols.map((c,i) => {
+            let v = r[c.name];
+            if (v == null) v = '';
+            const n = numSet.has(i) && typeof v === 'number';
+            const cls = n ? ' class="num"' : '';
+            const txt = n ? fmtNum(v) : esc(String(v));
+            return `<td${cls}>${hl(txt)}</td>`;
+        }).join('') + '</tr>'
+    ).join('');
+
+    if (rows.length > MAX)
+        tbody.innerHTML += `<tr><td colspan="${cols.length}" style="text-align:center;padding:20px;color:var(--text-secondary)">… ещё ${rows.length - MAX} строк — уточните поиск</td></tr>`;
+}
+
+/* ── Search ────────────────────────────────────────────── */
+let tid;
+searchInput.addEventListener('input', e => {
+    clearTimeout(tid);
+    tid = setTimeout(() => { query = e.target.value.trim(); renderRows(); }, 180);
+});
+
+/* ── Helpers ───────────────────────────────────────────── */
+function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function hl(t) { if (!query) return t; return t.replace(new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'gi'), '<mark>$&</mark>'); }
+function fmtNum(n) { return Number.isInteger(n) ? n.toLocaleString('ru-RU') : n.toLocaleString('ru-RU',{maximumFractionDigits:4}); }
+</script>
+</body>
+</html>
