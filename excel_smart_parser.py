@@ -157,8 +157,9 @@ class SheetAdapter(abc.ABC):
 # -- openpyxl (.xlsx / .xlsm / .xltx / .xltm) --------------------------------
 
 class OpenpyxlAdapter(SheetAdapter):
-    def __init__(self, ws, name: str):
+    def __init__(self, ws, name: str, wb=None):
         self._ws = ws
+        self._wb = wb  # ссылка на workbook для закрытия
         self.name = name
         self.max_row = ws.max_row or 0
         self.max_col = ws.max_column or 0
@@ -170,6 +171,8 @@ class OpenpyxlAdapter(SheetAdapter):
                     self._merged[(r, c)] = master
 
     def cell(self, row: int, col: int) -> CellValue:
+        if row < 1 or col < 1 or row > self.max_row or col > self.max_col:
+            return None
         if (row, col) in self._merged:
             return self._merged[(row, col)]
         return self._ws.cell(row, col).value
@@ -191,6 +194,15 @@ class OpenpyxlAdapter(SheetAdapter):
                     )
         return result
 
+    def close(self) -> None:
+        """Закрывает workbook, если адаптер хранит ссылку на него."""
+        if self._wb is not None:
+            try:
+                self._wb.close()
+            except Exception:
+                pass
+            self._wb = None
+
     def native_tables(self) -> list[dict]:
         tables = []
         for tname, tobj in self._ws.tables.items():
@@ -209,6 +221,7 @@ class OpenpyxlAdapter(SheetAdapter):
                     UserWarning, stacklevel=2,
                 )
         return tables
+
 
 
 # -- xlrd (.xls) ---------------------------------------------------------------
@@ -256,13 +269,15 @@ class XlrdAdapter(SheetAdapter):
                         sheet_idx = shtxlo
                         if self._book.sheet_names()[sheet_idx] != self.name:
                             continue
+                        # FIX: xlrd coords возвращает exclusive row1/col1,
+                        # но _parse_range ожидает inclusive границы
                         result.append({
                             "name": name,
                             "sheet": self.name,
                             "min_row": row0 + 1,
-                            "max_row": row1,
+                            "max_row": row1,      # row1 exclusive в xlrd = inclusive для 1-based
                             "min_col": col0 + 1,
-                            "max_col": col1,
+                            "max_col": col1,       # col1 exclusive в xlrd = inclusive для 1-based
                         })
                 except Exception as e:
                     warnings.warn(
@@ -330,6 +345,96 @@ class PyxlsbAdapter(SheetAdapter):
 
 # -- CSV -----------------------------------------------------------------------
 
+def _coerce_csv_value(v: str) -> CellValue:
+    """Приводит строковое значение CSV к числовому типу, если возможно."""
+    if not v:
+        return None
+    # Boolean
+    vl = v.strip().lower()
+    if vl in ("true", "false"):
+        return vl == "true"
+    # FIX: NaN/Infinity — невалидны в JSON, возвращаем как строку
+    if vl in ("nan", "inf", "-inf", "+inf", "infinity", "-infinity", "+infinity"):
+        return v
+    # Числа: убираем пробелы
+    cleaned = v.strip().replace(" ", "")
+    if not cleaned:
+        return v
+    # Целое число
+    try:
+        return int(cleaned)
+    except ValueError:
+        pass
+    # FIX: обработка тысячных разделителей.
+    # "1,234,567" или "1 234 567" — запятые/пробелы как тысячные, точка — десятичная
+    # "1.234.567" или "1.234,56" — точки как тысячные, запятая — десятичная
+    # Стратегия: определяем роль запятой и точки по позиции последнего вхождения.
+    has_comma = "," in cleaned
+    has_dot = "." in cleaned
+    if has_comma and has_dot:
+        # Оба символа: последний из них — десятичный разделитель
+        last_comma = cleaned.rfind(",")
+        last_dot = cleaned.rfind(".")
+        if last_comma > last_dot:
+            # "1.234,56" — точка тысячная, запятая десятичная
+            try:
+                return float(cleaned.replace(".", "").replace(",", ".", 1))
+            except ValueError:
+                pass
+        else:
+            # "1,234.56" — запятая тысячная, точка десятичная
+            try:
+                return float(cleaned.replace(",", ""))
+            except ValueError:
+                pass
+    elif has_comma and not has_dot:
+        # Только запятые: если больше одной — тысячные ("1,234,567")
+        comma_count = cleaned.count(",")
+        if comma_count > 1:
+            try:
+                return int(cleaned.replace(",", ""))
+            except ValueError:
+                pass
+            try:
+                return float(cleaned.replace(",", ""))
+            except ValueError:
+                pass
+        else:
+            # Одна запятая — десятичный разделитель ("3,14")
+            try:
+                return float(cleaned.replace(",", ".", 1))
+            except ValueError:
+                pass
+    elif has_dot and not has_comma:
+        # Только точки: если больше одной — тысячные ("1.234.567")
+        dot_count = cleaned.count(".")
+        if dot_count > 1:
+            try:
+                return int(cleaned.replace(".", ""))
+            except ValueError:
+                pass
+            try:
+                return float(cleaned.replace(".", ""))
+            except ValueError:
+                pass
+        else:
+            # Одна точка — стандартный float
+            try:
+                return float(cleaned)
+            except ValueError:
+                pass
+    else:
+        # Нет ни запятых, ни точек — уже пробовали int выше.
+        # FIX: пробуем float для научной нотации (1e5, -1E10, 2e-3)
+        try:
+            f = float(cleaned)
+            if math.isfinite(f):
+                return f
+        except ValueError:
+            pass
+    return v
+
+
 class CsvAdapter(SheetAdapter):
     """
     Адаптер CSV. Весь файл загружается в _row_cache одним проходом.
@@ -356,12 +461,16 @@ class CsvAdapter(SheetAdapter):
         return max_r, max_c
 
     def cell(self, row: int, col: int) -> CellValue:
+        if row < 1 or col < 1:
+            return None
         c = col - 1
         row_data = self._row_cache.get(row, [])
-        if c < 0 or c >= len(row_data):
+        if c >= len(row_data):
             return None
         v = row_data[c]
-        return v if v != "" else None
+        if v == "":
+            return None
+        return _coerce_csv_value(v)
 
     def iter_rows_lazy(self, cols: list[int]) -> Generator[tuple[int, list[CellValue]], None, None]:
         col_to_pos = {c: i for i, c in enumerate(cols)}
@@ -372,7 +481,7 @@ class CsvAdapter(SheetAdapter):
                 raw_c = c - 1
                 if 0 <= raw_c < len(row_data):
                     v = row_data[raw_c]
-                    vals[pos] = v if v != "" else None
+                    vals[pos] = _coerce_csv_value(v) if v != "" else None
             yield r, vals
 
 
@@ -381,6 +490,12 @@ class CsvAdapter(SheetAdapter):
 # ==============================================================================
 
 def load_sheets(filepath: str, only_sheet: Optional[str] = None) -> list[SheetAdapter]:
+    """Загружает листы из файла.
+
+    ВАЖНО: для .xlsx/.xlsm файлов вызывающий код должен закрыть workbook
+    после использования: ``adapters[0]._ws.parent.close()`` (если adapters не пуст).
+    При использовании через ExcelParser.parse_file() закрытие происходит автоматически.
+    """
     ext = os.path.splitext(filepath)[1].lower()
     if ext in (".xlsx", ".xlsm", ".xltx", ".xltm"):
         return _load_xlsx(filepath, only_sheet)
@@ -389,7 +504,7 @@ def load_sheets(filepath: str, only_sheet: Optional[str] = None) -> list[SheetAd
     elif ext == ".xlsb":
         return _load_xlsb(filepath, only_sheet)
     elif ext == ".csv":
-        return _load_csv(filepath)
+        return _load_csv(filepath, only_sheet)
     else:
         raise ValueError(f"Неподдерживаемый формат: {ext}. "
                          "Поддерживается: .xlsx .xlsm .xls .xlsb .csv")
@@ -453,7 +568,14 @@ def _load_xlsx(filepath: str, only_sheet: Optional[str]) -> list[OpenpyxlAdapter
         ws = wb[name]
         if not ws.max_row:
             continue
-        sheets.append(OpenpyxlAdapter(ws, name))
+        sheets.append(OpenpyxlAdapter(ws, name, wb=wb))
+    # FIX: если не создано ни одного адаптера — закрываем workbook,
+    # иначе он утечёт (нет адаптера, через который вызвать close())
+    if not sheets:
+        try:
+            wb.close()
+        except Exception:
+            pass
     return sheets
 
 
@@ -500,13 +622,13 @@ def _load_xlsb(filepath: str, only_sheet: Optional[str]) -> list[PyxlsbAdapter]:
                             max_c = c_idx + 1
                         tmp.setdefault(r, {})[c_idx] = cell.v
 
-            # Конвертируем в row_cache
+            # Конвертируем в row_cache (с конвертацией Excel serial dates)
             row_cache: dict[int, list] = {}
             for r, cols in tmp.items():
                 data = [None] * max_c
                 for c_idx, v in cols.items():
                     if 0 <= c_idx < max_c:
-                        data[c_idx] = v
+                        data[c_idx] = _xlsb_convert_date(v) if isinstance(v, float) else v
                 row_cache[r] = data
 
             # Фильтруем named ranges для этого листа
@@ -521,6 +643,35 @@ def _load_xlsb(filepath: str, only_sheet: Optional[str]) -> list[PyxlsbAdapter]:
             ))
 
     return result
+
+
+def _xlsb_convert_date(v: CellValue) -> CellValue:
+    """Конвертирует Excel serial date number в datetime, если это дата.
+
+    Excel хранит даты как float: целая часть = дни с 1899-12-30,
+    дробная часть = время. Диапазон 1.0..2958465.0 покрывает 1900-01-01..9999-12-31.
+    Целые числа и числа вне диапазона не конвертируются.
+    """
+    if not isinstance(v, float):
+        return v
+    if not math.isfinite(v):
+        return v
+    # Только float с дробной частью или в "типичном" диапазоне дат Excel
+    # Отсекаем отрицательные и слишком большие значения
+    if v < 1.0 or v > 2958465.0:
+        return v
+    # Если это целое число — вероятнее обычное число, а не дата
+    # (даты без времени редки в xlsb, т.к. pyxlsb обычно возвращает их как float с .0)
+    # Проверяем: если дробная часть ненулевая — это дата+время, конвертируем
+    # Если дробная часть нулевая — неоднозначно, оставляем как число
+    if v == int(v):
+        return v
+    try:
+        # Excel epoch: 1899-12-30 (с учётом бага Lotus 1-2-3 с 29 февраля 1900)
+        epoch = datetime.datetime(1899, 12, 30)
+        return epoch + datetime.timedelta(days=v)
+    except (ValueError, OverflowError):
+        return v
 
 
 def _read_xlsb_named_ranges(wb) -> list[dict]:
@@ -568,25 +719,42 @@ def _read_xlsb_named_ranges(wb) -> list[dict]:
 def _detect_encoding(filepath: str) -> str:
     if HAS_CHARDET:
         with open(filepath, "rb") as f:
-            raw = f.read(32768)
+            raw = f.read(131072)  # 128KB для надёжного определения кодировки
         detected = _chardet.detect(raw)
         enc = (detected.get("encoding") or "utf-8").strip()
         try:
             codecs.lookup(enc)
+            # FIX: если chardet вернул "utf-8", но файл начинается с BOM,
+            # используем "utf-8-sig" чтобы BOM не попал в данные
+            if enc.lower().replace("-", "") == "utf8" and raw[:3] == b'\xef\xbb\xbf':
+                return "utf-8-sig"
             return enc
         except LookupError:
             pass
-    for enc in ("utf-8-sig", "utf-8", "cp1251", "cp1252", "latin-1"):
+    # FIX: читаем до 1MB — достаточно для надёжного определения кодировки,
+    # но не вызовет MemoryError на огромных CSV.
+    # latin-1 вынесен отдельно — он принимает ВСЕ байты и является последним fallback.
+    _ENC_SAMPLE_SIZE = 1024 * 1024  # 1MB
+    for enc in ("utf-8-sig", "utf-8", "cp1251", "cp1252"):
         try:
-            with open(filepath, encoding=enc) as f:
-                f.read(4096)
+            with open(filepath, encoding=enc, errors="strict") as f:
+                while True:
+                    chunk = f.read(_ENC_SAMPLE_SIZE)
+                    if not chunk:
+                        break
             return enc
         except (UnicodeDecodeError, LookupError):
             continue
-    return "utf-8"
+    # latin-1 принимает любой байт 0x00-0xFF — гарантированный fallback
+    return "latin-1"
 
 
-def _load_csv(filepath: str) -> list[CsvAdapter]:
+def _load_csv(filepath: str, only_sheet: Optional[str] = None) -> list[CsvAdapter]:
+    sheet_name = os.path.basename(filepath)
+    # FIX: если указан --sheet и имя не совпадает с именем файла, пропускаем
+    if only_sheet and only_sheet != sheet_name:
+        return []
+
     encoding = _detect_encoding(filepath)
 
     # FIX v19: пробел убран из разделителей — ложно срабатывает на текстах
@@ -598,12 +766,11 @@ def _load_csv(filepath: str) -> list[CsvAdapter]:
             dialect = csv.Sniffer().sniff(sample, delimiters=KNOWN_DELIMITERS)
             delimiter = dialect.delimiter
         except csv.Error:
-            _FALLBACK_DELIMITERS = frozenset(",;\t|^~")
-            candidates = {d: sample.count(d) for d in _FALLBACK_DELIMITERS}
+            candidates = {d: sample.count(d) for d in KNOWN_DELIMITERS}
             _best = max(candidates, key=candidates.get)
             delimiter = _best if candidates[_best] > 0 else ","
 
-        return [CsvAdapter(filepath, encoding, delimiter, os.path.basename(filepath))]
+        return [CsvAdapter(filepath, encoding, delimiter, sheet_name)]
     except Exception as e:
         raise ValueError(f"Не удалось прочитать CSV '{filepath}': {e}") from e
 
@@ -658,6 +825,9 @@ def _is_year(v: CellValue) -> bool:
 
 def _serialize(v: CellValue) -> Any:
     # FIX v19: обработка time и timedelta
+    # FIX v20: обработка NaN/Infinity — невалидны в JSON
+    if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+        return None
     if isinstance(v, (datetime.datetime, datetime.date)):
         return v.isoformat()
     if isinstance(v, datetime.time):
@@ -679,8 +849,9 @@ def _detect_dtype(values: list[CellValue]) -> str:
     total = len(non_empty)
 
     # FIX v19: распознавание boolean
+    # FIX v20: >= 0.5 вместо > 0.5, чтобы 50% bool + 50% num не возвращал "text"
     bools = sum(1 for v in non_empty if isinstance(v, bool))
-    if bools / total > 0.5:
+    if bools / total >= 0.5:
         return "boolean"
 
     nums = sum(1 for v in non_empty if _is_numeric(v))
@@ -801,9 +972,21 @@ class StreamingWriter:
     def _open(self, path: str, fmt: str) -> None:
         if fmt == "json":
             self._json_fh = open(path, "w", encoding="utf-8")
-            meta = {k: v for k, v in self._file_meta.items()}
-            meta_str = json.dumps(meta, ensure_ascii=False)
-            self._json_fh.write(meta_str[:-1] + ', "tables_data": [\n')
+            # FIX: сначала пишем все ключи meta, затем tables_data —
+            # гарантированно не теряем ключи, даже если порядок dict изменится.
+            self._json_fh.write("{")
+            first = True
+            for k, v in self._file_meta.items():
+                if not first:
+                    self._json_fh.write(", ")
+                first = False
+                self._json_fh.write(
+                    json.dumps(k, ensure_ascii=False) + ": "
+                    + json.dumps(v, ensure_ascii=False)
+                )
+            if not first:
+                self._json_fh.write(", ")
+            self._json_fh.write('"tables_data": [\n')
             self._first_table = True
         elif fmt == "jsonl":
             self._jsonl_fh = open(path, "w", encoding="utf-8")
@@ -818,8 +1001,19 @@ class StreamingWriter:
             sep = "" if self._first_table else ",\n"
             self._first_table = False
             meta = {k: v for k, v in table.items() if k != "rows"}
-            meta_str = json.dumps(meta, ensure_ascii=False, default=str)
-            self._json_fh.write(sep + meta_str[:-1] + ', "rows": [')
+            # Формируем JSON объект без хака с обрезкой последнего символа
+            self._json_fh.write(sep + "{")
+            meta_items = list(meta.items())
+            for idx, (k, v) in enumerate(meta_items):
+                if idx > 0:
+                    self._json_fh.write(", ")
+                self._json_fh.write(
+                    json.dumps(k, ensure_ascii=False) + ": "
+                    + json.dumps(v, ensure_ascii=False, default=str)
+                )
+            if meta_items:
+                self._json_fh.write(", ")
+            self._json_fh.write('"rows": [')
             rows = table.get("rows", [])
             for i, row in enumerate(rows):
                 row_sep = "" if i == 0 else ","
@@ -844,7 +1038,13 @@ class StreamingWriter:
             )
             path = os.path.join(self._csv_dir,
                                 f"{self._table_count:02d}_{safe}.csv")
-            fieldnames = list(rows[0].keys())
+            columns = table.get("columns")
+            if columns:
+                fieldnames = [col["name"] for col in columns]
+            else:
+                fieldnames = list(dict.fromkeys(
+                    k for row in rows for k in row
+                ))
             with open(path, "w", newline="", encoding="utf-8-sig") as f:
                 w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
                 w.writeheader()
@@ -863,20 +1063,43 @@ class StreamingWriter:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        # Безопасное закрытие даже при ошибке
-        try:
-            if exc_type is None:
-                self.close()
-            else:
-                # При ошибке закрываем без финализации JSON
+        if exc_type is None:
+            # Парсинг прошёл без ошибок — финализируем файл.
+            # Если close() упадёт (диск, права), ошибка пробросится наружу.
+            self.close()
+        else:
+            # FIX v20: при ошибке парсинга — закрываем файлы и удаляем
+            # битый output, чтобы не оставлять невалидные файлы на диске.
+            try:
                 if self._json_fh:
                     self._json_fh.close()
                     self._json_fh = None
                 if self._jsonl_fh:
                     self._jsonl_fh.close()
                     self._jsonl_fh = None
-        except Exception:
-            pass
+            except Exception:
+                pass
+            # Удаляем повреждённый output
+            try:
+                if self.output_path:
+                    if self.fmt in ("json", "jsonl") and os.path.isfile(self.output_path):
+                        os.remove(self.output_path)
+                        warnings.warn(
+                            f"Удалён неполный файл '{self.output_path}' "
+                            "после ошибки парсинга.",
+                            UserWarning, stacklevel=2,
+                        )
+                    elif self.fmt == "csv" and self._csv_dir and os.path.isdir(self._csv_dir):
+                        # FIX: удаляем частично записанную CSV-директорию
+                        import shutil
+                        shutil.rmtree(self._csv_dir, ignore_errors=True)
+                        warnings.warn(
+                            f"Удалена неполная директория '{self._csv_dir}' "
+                            "после ошибки парсинга.",
+                            UserWarning, stacklevel=2,
+                        )
+            except OSError:
+                pass
         return False
 
     @property
@@ -908,12 +1131,13 @@ class ExcelParser:
         self.skip_hidden = skip_hidden
         self.min_data_cells = min_data_cells
         self.max_empty_streak = max_empty_streak
-        self._vis_cache: dict[int, tuple[list[int], list[int]]] = {}
+        self._vis_cache: dict[tuple[int, str], tuple[list[int], list[int]]] = {}
 
     # -- Видимые строки / колонки -----------------------------------------------
 
     def _visible(self, adapter: SheetAdapter) -> tuple[list[int], list[int]]:
-        key = id(adapter)
+        # FIX: используем (id, name) чтобы избежать коллизий после GC
+        key = (id(adapter), adapter.name)
         if key not in self._vis_cache:
             hr = adapter.hidden_rows() if self.skip_hidden else set()
             hc = adapter.hidden_cols() if self.skip_hidden else set()
@@ -943,8 +1167,10 @@ class ExcelParser:
                 v = adapter.cell(r, c)
                 col_values[c].append(v)
                 if not _is_empty(v):
-                    rd[col_name] = _serialize(v)
-                    has = True
+                    sv = _serialize(v)
+                    if sv is not None:
+                        rd[col_name] = sv
+                        has = True
             if has:
                 rows_out.append(rd)
         return rows_out, col_values
@@ -962,8 +1188,11 @@ class ExcelParser:
         if min_col > max_col or min_row > max_row:
             return None
 
-        vis_rows, _ = self._visible(adapter)
-        cols = list(range(min_col, max_col + 1))
+        vis_rows, vis_cols = self._visible(adapter)
+        vis_cols_set = set(vis_cols)
+        cols = [c for c in range(min_col, max_col + 1) if c in vis_cols_set]
+        if not cols:
+            return None
         rows_in = [r for r in vis_rows if min_row <= r <= max_row]
         if len(rows_in) < 2:
             return None
@@ -1166,9 +1395,22 @@ class ExcelParser:
                         break
                     continue
 
+                # FIX v20: строки ниже min_data_cells не сбрасывают empty_streak —
+                # иначе одиночные ячейки между таблицами мешают обнаружению границ
                 if non_e < self.min_data_cells:
-                    empty_streak = 0
+                    empty_streak += 1
+                    if empty_streak >= self.max_empty_streak:
+                        break
                     continue
+
+                # FIX: если после пустых строк встречается строка, похожая на
+                # заголовок новой таблицы — прекращаем сбор текущей таблицы.
+                # Читаем ВСЕ видимые колонки (не только active_cols), т.к. новая
+                # таблица может иметь другой набор колонок.
+                if empty_streak > 0 and data_rows:
+                    full_rv = [adapter.cell(r, c) for c in vis_cols]
+                    if _is_header_row(full_rv, self.header_threshold):
+                        break
 
                 empty_streak = 0
                 data_rows.append(r)
@@ -1177,8 +1419,10 @@ class ExcelParser:
                 i += 1
                 continue
 
-            span = set(range(header_rows[0], data_rows[-1] + 1))
-            if span & used_rows:
+            # FIX v20: проверяем пересечение только по реальным строкам
+            # (заголовки + данные), а не сплошным диапазоном
+            actual_rows = set(header_rows) | set(data_rows)
+            if actual_rows & used_rows:
                 i += 1
                 continue
 
@@ -1213,7 +1457,8 @@ class ExcelParser:
                     ],
                     "rows": rows_out,
                 })
-                used_rows.update(span)
+                # FIX v20: блокируем только реальные строки, не сплошной диапазон
+                used_rows.update(actual_rows)
 
             i = row_idx.get(data_rows[-1], i) + 1
 
@@ -1312,7 +1557,9 @@ class ExcelParser:
                 ],
                 "rows": rows_out,
             })
-            used_rows.update(range(header_row, data_rows[-1] + 1))
+            # FIX v20: блокируем только реальные строки (заголовок + данные)
+            used_rows.add(header_row)
+            used_rows.update(data_rows)
 
         return results
 
@@ -1341,7 +1588,10 @@ class ExcelParser:
 
             block_rows: list[int] = []
             empty_streak = 0
+            # FIX: отслеживаем реальную позицию j для корректного продвижения i
+            scan_end = i
             for j in range(i, len(vis_rows)):
+                scan_end = j
                 rj = vis_rows[j]
                 if rj in used_rows:
                     break
@@ -1356,7 +1606,7 @@ class ExcelParser:
                 block_rows.append(rj)
 
             if len(block_rows) < 2:
-                i += len(block_rows) + 1
+                i = scan_end + 1
                 continue
 
             col_map: dict[int, str] = {c: get_column_letter(c) for c in vis_cols}
@@ -1383,9 +1633,10 @@ class ExcelParser:
                     ],
                     "rows": rows_out,
                 })
-                used_rows.update(range(block_rows[0], block_rows[-1] + 1))
+                # FIX v20: блокируем только реальные строки
+                used_rows.update(block_rows)
 
-            i += len(block_rows) + 1
+            i = scan_end + 1
 
         return tables
 
@@ -1429,7 +1680,10 @@ class ExcelParser:
         all_tables.extend(heuristic)
 
         # 4. Вертикальные таблицы
-        all_tables.extend(self._extract_vertical(adapter, used_rows))
+        vertical = self._extract_vertical(adapter, used_rows)
+        for t in vertical:
+            used_rows.update(range(t["header_row"], t["data_end"] + 1))
+        all_tables.extend(vertical)
 
         # 5. Беззаголовочные таблицы
         all_tables.extend(self._extract_headerless(adapter, used_rows))
@@ -1511,23 +1765,49 @@ class ExcelParser:
         except Exception as e:
             parse_error = e
         finally:
+            # Закрываем writer: при ошибке парсинга — без финализации;
+            # при успехе — полный close() с пробросом ошибок записи.
+            close_error = None
             if writer:
-                try:
-                    if parse_error is None:
-                        writer.close()
-                    else:
-                        # При ошибке закрываем файл без финализации JSON
+                if parse_error is not None:
+                    try:
                         if writer._json_fh:
                             writer._json_fh.close()
                             writer._json_fh = None
                         if writer._jsonl_fh:
                             writer._jsonl_fh.close()
                             writer._jsonl_fh = None
+                        # FIX v20: удаляем битый output при ошибке парсинга
+                        if output_path and fmt in ("json", "jsonl"):
+                            if os.path.isfile(output_path):
+                                os.remove(output_path)
+                        elif output_path and fmt == "csv" and writer._csv_dir:
+                            if os.path.isdir(writer._csv_dir):
+                                import shutil
+                                shutil.rmtree(writer._csv_dir, ignore_errors=True)
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        writer.close()
+                    except Exception as e:
+                        close_error = e
+            # Закрываем openpyxl workbook после парсинга
+            if wb is not None:
+                try:
+                    wb.close()
                 except Exception:
-                    pass  # не маскируем parse_error
+                    pass
 
         if parse_error is not None:
+            if close_error is not None:
+                warnings.warn(
+                    f"Дополнительная ошибка при закрытии writer: {close_error}",
+                    UserWarning, stacklevel=2,
+                )
             raise parse_error
+        if close_error is not None:
+            raise close_error
 
         if writer:
             n_tables, n_rows = writer.stats
@@ -1590,8 +1870,15 @@ def _write_output(result: dict, path: str, fmt: str) -> None:
                 .replace(":", "_").replace(" ", "_")[:60]
             )
             csv_path = os.path.join(path, f"{idx + 1:02d}_{safe}.csv")
+            columns = table.get("columns")
+            if columns:
+                fieldnames = [col["name"] for col in columns]
+            else:
+                fieldnames = list(dict.fromkeys(
+                    k for row in rows for k in row
+                ))
             with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
-                w = csv.DictWriter(f, fieldnames=list(rows[0].keys()), extrasaction="ignore")
+                w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
                 w.writeheader()
                 w.writerows(rows)
     else:
