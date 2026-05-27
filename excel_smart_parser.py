@@ -1,5 +1,30 @@
 """
-Excel Universal Parser v19
+Excel Universal Parser v21
+===============================================================================
+Исправления v21 (анализ багов):
+
+  [FIX] _coerce_csv_value: некорректные группы тысяч ("1.2.3.4", "1,2,3",
+        "12.34.56") больше не склеиваются в число — IP-адреса, версии,
+        составные коды сохраняются как строки. Добавлена валидация
+        группировки (_valid_grouping): первая группа 1-3 цифры, остальные
+        ровно по 3.
+
+  [FIX] _coerce_csv_value: значения с ведущим нулём ("007", "01234") —
+        это коды/индексы/телефоны, а не числа. Раньше int() терял ведущие
+        нули; теперь сохраняются как строки. "0" и "0.5" не затронуты.
+
+  [FIX] _detect_encoding: chardet определяет "ascii" по выборке (128KB).
+        Если файл ASCII в начале, но содержит не-ASCII дальше, strict-чтение
+        падало. "ascii" -> "utf-8" (надмножество).
+
+  [FIX] CsvAdapter: strict-чтение всего файла падало при ошибочной
+        кодировке за пределами выборки. Добавлен фоллбэк errors="replace"
+        с предупреждением вместо полной потери файла.
+
+  [FIX] _write_output / StreamingWriter: для json/jsonl родительская
+        директория теперь создаётся автоматически (--out-dir в несуществующую
+        директорию падал с FileNotFoundError).
+
 ===============================================================================
 Исправления относительно v18.1:
 
@@ -345,6 +370,21 @@ class PyxlsbAdapter(SheetAdapter):
 
 # -- CSV -----------------------------------------------------------------------
 
+def _valid_grouping(int_part: str, sep: str) -> bool:
+    """True, если int_part — корректная группировка тысяч разделителем sep.
+
+    Первая группа 1-3 цифры, все последующие — ровно 3 цифры.
+    "1,234,567" / "12.345.678" → True; "1,2,3" / "1.2.3.4" / "12.34" → False.
+    int_part должен быть без знака.
+    """
+    groups = int_part.split(sep)
+    if len(groups) < 2:
+        return False
+    if not groups[0].isdigit() or not (1 <= len(groups[0]) <= 3):
+        return False
+    return all(g.isdigit() and len(g) == 3 for g in groups[1:])
+
+
 def _coerce_csv_value(v: str) -> CellValue:
     """Приводит строковое значение CSV к числовому типу, если возможно."""
     if not v:
@@ -360,67 +400,80 @@ def _coerce_csv_value(v: str) -> CellValue:
     cleaned = v.strip().replace(" ", "")
     if not cleaned:
         return v
+    # Тело без знака — для проверок ведущего нуля и группировки тысяч
+    body = cleaned[1:] if cleaned[:1] in "+-" else cleaned
+    # FIX v21: ведущий ноль (почтовые индексы, телефоны, коды, ID) — это код,
+    # а не число. int("007") вернул бы 7, теряя данные. Сохраняем как строку.
+    # "0" и десятичные "0.5"/"0.0" не затрагиваются (после нуля не цифра).
+    if len(body) > 1 and body[0] == "0" and body[1].isdigit():
+        return v
+    # FIX v21: Python int()/float() принимают "_" как разделитель разрядов
+    # (PEP 515): int("1_000") == 1000. CSV-значения с подчёркиванием — это
+    # коды/идентификаторы ("99_99", "PART_1"), а не числа. Оставляем строкой.
+    if "_" in cleaned:
+        return v
     # Целое число
     try:
         return int(cleaned)
     except ValueError:
         pass
-    # FIX: обработка тысячных разделителей.
-    # "1,234,567" или "1 234 567" — запятые/пробелы как тысячные, точка — десятичная
-    # "1.234.567" или "1.234,56" — точки как тысячные, запятая — десятичная
-    # Стратегия: определяем роль запятой и точки по позиции последнего вхождения.
+    # Обработка тысячных разделителей с ВАЛИДАЦИЕЙ группировки.
+    # "1,234,567" / "1.234.567" — тысячные; "1.234,56" / "1,234.56" — тыс.+дес.
+    # FIX v21: некорректные группы ("1.2.3.4", "1,2,3", "12.34.56") больше не
+    # склеиваются в число — IP-адреса, версии и пр. сохраняются как строки.
     has_comma = "," in cleaned
     has_dot = "." in cleaned
     if has_comma and has_dot:
-        # Оба символа: последний из них — десятичный разделитель
         last_comma = cleaned.rfind(",")
         last_dot = cleaned.rfind(".")
         if last_comma > last_dot:
             # "1.234,56" — точка тысячная, запятая десятичная
-            try:
-                return float(cleaned.replace(".", "").replace(",", ".", 1))
-            except ValueError:
-                pass
+            int_part, dec_part = cleaned.rsplit(",", 1)
+            body_int = int_part[1:] if int_part[:1] in "+-" else int_part
+            if dec_part.isdigit() and _valid_grouping(body_int, "."):
+                try:
+                    return float(int_part.replace(".", "") + "." + dec_part)
+                except ValueError:
+                    pass
         else:
             # "1,234.56" — запятая тысячная, точка десятичная
-            try:
-                return float(cleaned.replace(",", ""))
-            except ValueError:
-                pass
+            int_part, dec_part = cleaned.rsplit(".", 1)
+            body_int = int_part[1:] if int_part[:1] in "+-" else int_part
+            if dec_part.isdigit() and _valid_grouping(body_int, ","):
+                try:
+                    return float(int_part.replace(",", "") + "." + dec_part)
+                except ValueError:
+                    pass
     elif has_comma and not has_dot:
-        # Только запятые: если больше одной — тысячные ("1,234,567")
-        comma_count = cleaned.count(",")
-        if comma_count > 1:
-            try:
-                return int(cleaned.replace(",", ""))
-            except ValueError:
-                pass
-            try:
-                return float(cleaned.replace(",", ""))
-            except ValueError:
-                pass
+        if cleaned.count(",") > 1:
+            # Несколько запятых — тысячные ("1,234,567"), только если валидны
+            if _valid_grouping(body, ","):
+                try:
+                    return int(cleaned.replace(",", ""))
+                except ValueError:
+                    pass
         else:
             # Одна запятая — десятичный разделитель ("3,14")
             try:
-                return float(cleaned.replace(",", ".", 1))
+                f = float(cleaned.replace(",", ".", 1))
+                if math.isfinite(f):
+                    return f
             except ValueError:
                 pass
     elif has_dot and not has_comma:
-        # Только точки: если больше одной — тысячные ("1.234.567")
-        dot_count = cleaned.count(".")
-        if dot_count > 1:
-            try:
-                return int(cleaned.replace(".", ""))
-            except ValueError:
-                pass
-            try:
-                return float(cleaned.replace(".", ""))
-            except ValueError:
-                pass
+        if cleaned.count(".") > 1:
+            # Несколько точек — тысячные ("1.234.567"), только если валидны
+            if _valid_grouping(body, "."):
+                try:
+                    return int(cleaned.replace(".", ""))
+                except ValueError:
+                    pass
         else:
             # Одна точка — стандартный float
             try:
-                return float(cleaned)
+                f = float(cleaned)
+                if math.isfinite(f):
+                    return f
             except ValueError:
                 pass
     else:
@@ -450,8 +503,26 @@ class CsvAdapter(SheetAdapter):
         self.max_row, self.max_col = self._load_cache()
 
     def _load_cache(self) -> tuple[int, int]:
+        # FIX v21: кодировка определяется по выборке файла. Если она ошибочна
+        # для содержимого за пределами выборки, strict-чтение всего файла
+        # упадёт с UnicodeDecodeError. Перечитываем с errors="replace", чтобы
+        # не потерять весь файл из-за нескольких неверно угаданных байт.
+        try:
+            return self._read_into_cache("strict")
+        except UnicodeDecodeError as e:
+            warnings.warn(
+                f"CSV '{os.path.basename(self._filepath)}': ошибка декодирования "
+                f"в кодировке '{self._encoding}' ({e}). Повторное чтение с "
+                "errors='replace' — отдельные символы могут быть заменены.",
+                UserWarning, stacklevel=2,
+            )
+            self._row_cache.clear()
+            return self._read_into_cache("replace")
+
+    def _read_into_cache(self, errors: str) -> tuple[int, int]:
         max_r = max_c = 0
-        with open(self._filepath, newline="", encoding=self._encoding) as f:
+        with open(self._filepath, newline="", encoding=self._encoding,
+                  errors=errors) as f:
             for i, row in enumerate(csv.reader(f, delimiter=self._delimiter)):
                 r = i + 1
                 max_r = r
@@ -722,6 +793,11 @@ def _detect_encoding(filepath: str) -> str:
             raw = f.read(131072)  # 128KB для надёжного определения кодировки
         detected = _chardet.detect(raw)
         enc = (detected.get("encoding") or "utf-8").strip()
+        # FIX v21: "ascii" определяется по выборке (первые 128KB). Если файл
+        # ASCII в начале, но содержит не-ASCII байты дальше, strict-чтение
+        # упадёт. UTF-8 — надмножество ASCII: читает и то, и другое.
+        if enc.lower() == "ascii":
+            enc = "utf-8"
         try:
             codecs.lookup(enc)
             # FIX: если chardet вернул "utf-8", но файл начинается с BOM,
@@ -760,7 +836,9 @@ def _load_csv(filepath: str, only_sheet: Optional[str] = None) -> list[CsvAdapte
     # FIX v19: пробел убран из разделителей — ложно срабатывает на текстах
     KNOWN_DELIMITERS = ",;\t|^~"
     try:
-        with open(filepath, newline="", encoding=encoding) as f:
+        # errors="replace": выборка нужна лишь для определения разделителя,
+        # обрезанный multibyte-символ на границе не должен ронять весь парсинг.
+        with open(filepath, newline="", encoding=encoding, errors="replace") as f:
             sample = f.read(16384)
         try:
             dialect = csv.Sniffer().sniff(sample, delimiters=KNOWN_DELIMITERS)
@@ -940,16 +1018,27 @@ def _is_header_row(vals: list[CellValue], threshold: float = 0.4) -> bool:
 
 
 def _dedupe_headers(names: list[str]) -> list[str]:
+    # FIX v21: гарантируем УНИКАЛЬНОСТЬ. Раньше сгенерированный суффикс
+    # ("Name_2") мог совпасть с явным заголовком далее по списку, давая
+    # дубликат ключа → молчаливая потеря данных в row-dict / CSV DictWriter.
+    # Теперь отслеживаем все выданные имена и инкрементируем до уникального.
     seen: dict[str, int] = {}
+    used: set[str] = set()
     result: list[str] = []
     for i, name in enumerate(names):
-        key = name if name else f"_col_{i + 1}"
-        if key not in seen:
-            seen[key] = 1
-            result.append(key)
+        base = name if name else f"_col_{i + 1}"
+        if base not in used:
+            seen[base] = 1
+            candidate = base
         else:
-            seen[key] += 1
-            result.append(f"{key}_{seen[key]}")
+            cnt = seen.get(base, 1) + 1
+            candidate = f"{base}_{cnt}"
+            while candidate in used:
+                cnt += 1
+                candidate = f"{base}_{cnt}"
+            seen[base] = cnt
+        used.add(candidate)
+        result.append(candidate)
     return result
 
 
@@ -970,6 +1059,12 @@ class StreamingWriter:
         self._open(output_path, fmt)
 
     def _open(self, path: str, fmt: str) -> None:
+        # FIX v21: создаём родительскую директорию, если её нет —
+        # иначе open() для json/jsonl падает с FileNotFoundError.
+        if fmt in ("json", "jsonl"):
+            parent = os.path.dirname(path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
         if fmt == "json":
             self._json_fh = open(path, "w", encoding="utf-8")
             # FIX: сначала пишем все ключи meta, затем tables_data —
@@ -1185,6 +1280,18 @@ class ExcelParser:
         source: str,
         name: str,
     ) -> Optional[dict]:
+        # FIX v21: диапазоны на весь столбец/строку ("$A:$B", "$1:$5") дают
+        # None в одной из границ (range_boundaries('A:B') -> (1, None, 2, None)).
+        # Клампим к фактическим размерам листа, иначе сравнение None > None
+        # роняет парсинг с TypeError.
+        if min_row is None:
+            min_row = 1
+        if max_row is None:
+            max_row = adapter.max_row
+        if min_col is None:
+            min_col = 1
+        if max_col is None:
+            max_col = adapter.max_col
         if min_col > max_col or min_row > max_row:
             return None
 
@@ -1258,7 +1365,16 @@ class ExcelParser:
         except AttributeError:
             return results
 
-        for dn in defined:
+        # FIX v21: в openpyxl 3.1+ wb.defined_names — это DefinedNameDict
+        # (отображение {name: DefinedName}). Итерация по нему даёт СТРОКИ-ключи,
+        # из-за чего `dn.destinations` бросал AttributeError и все именованные
+        # диапазоны .xlsx молча терялись. Берём .values() для объектов
+        # DefinedName; старые версии (итерируемые) обрабатываем как есть.
+        defined_iter = (
+            list(defined.values()) if hasattr(defined, "values") else list(defined)
+        )
+
+        for dn in defined_iter:
             try:
                 destinations = dn.destinations
             except AttributeError:
@@ -1849,6 +1965,11 @@ class ExcelParser:
 # ==============================================================================
 
 def _write_output(result: dict, path: str, fmt: str) -> None:
+    # FIX v21: создаём родительскую директорию для json/jsonl, если её нет.
+    if fmt in ("json", "jsonl"):
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
     if fmt == "json":
         with open(path, "w", encoding="utf-8") as f:
             json.dump(result, f, ensure_ascii=False, indent=2, default=str)
@@ -1891,7 +2012,7 @@ def _write_output(result: dict, path: str, fmt: str) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Excel Universal Parser v19",
+        description="Excel Universal Parser v21",
         formatter_class=argparse.RawTextHelpFormatter,
     )
     ap.add_argument("files", nargs="+",

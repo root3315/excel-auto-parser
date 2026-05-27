@@ -1607,6 +1607,170 @@ os.unlink(big_csv2)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# 41. Регрессии v21 — числовая коэрция и кодировки
+# ══════════════════════════════════════════════════════════════════════════════
+
+section("41. v21 регрессии: _coerce_csv_value и кодировки")
+
+# -- Bug: невалидные группы тысяч НЕ должны парситься как число --
+# "1.2.3.4" (IP / версия) ранее превращалось в 1234 — потеря данных.
+test("coerce '1.2.3.4' → строка (не 1234)", p._coerce_csv_value("1.2.3.4") == "1.2.3.4")
+test("coerce '1,2,3' → строка (не 123)", p._coerce_csv_value("1,2,3") == "1,2,3")
+test("coerce '12.34.56' → строка (группы не по 3)", p._coerce_csv_value("12.34.56") == "12.34.56")
+test("coerce '1.22.333' → строка (первая группа ок, средняя нет)",
+     p._coerce_csv_value("1.22.333") == "1.22.333")
+
+# -- Валидные группы тысяч продолжают работать --
+test("coerce '1,234,567' → 1234567 (регресс-гард)", p._coerce_csv_value("1,234,567") == 1234567)
+test("coerce '1.234.567' → 1234567", p._coerce_csv_value("1.234.567") == 1234567)
+test("coerce '1.234,56' → 1234.56 (регресс-гард)", p._coerce_csv_value("1.234,56") == 1234.56)
+test("coerce '1,234.56' → 1234.56 (регресс-гард)", p._coerce_csv_value("1,234.56") == 1234.56)
+test("coerce '12.345.678,90' → 12345678.9", p._coerce_csv_value("12.345.678,90") == 12345678.90)
+
+# -- Bug: ведущие нули (коды, индексы, телефоны) теряются при int() --
+test("coerce '007' → '007' (строка, ведущий ноль)", p._coerce_csv_value("007") == "007")
+test("coerce '01234' → '01234' (почтовый индекс)", p._coerce_csv_value("01234") == "01234")
+test("coerce '00' → '00' (строка)", p._coerce_csv_value("00") == "00")
+
+# -- Регресс-гард: обычные числа и ноль не затронуты --
+test("coerce '0' → 0 (регресс-гард)", p._coerce_csv_value("0") == 0 and isinstance(p._coerce_csv_value("0"), int))
+test("coerce '0.0' → 0.0 (регресс-гард)", p._coerce_csv_value("0.0") == 0.0)
+test("coerce '0.5' → 0.5 (регресс-гард)", p._coerce_csv_value("0.5") == 0.5)
+test("coerce '42' → 42 (регресс-гард)", p._coerce_csv_value("42") == 42)
+test("coerce '-42' → -42 (регресс-гард)", p._coerce_csv_value("-42") == -42)
+
+# -- Bug: CSV ascii в первых 128KB, кириллица дальше → крах strict-чтения --
+enc_csv = os.path.join(TEST_DIR, "_test_enc_late.csv")
+with open(enc_csv, "w", encoding="utf-8", newline="") as f:
+    f.write("a,b,c\n")
+    for i in range(20000):            # > 128KB чистого ASCII
+        f.write(f"{i},{i*2},{i*3}\n")
+    f.write("Привет,мир,конец\n")     # кириллица далеко за окном детекции
+try:
+    adapters = p._load_csv(enc_csv)
+    _enc_ok = bool(adapters)
+    _last = adapters[0].cell(adapters[0].max_row, 1) if adapters else None
+except Exception as _e:
+    _enc_ok = False
+    _last = f"CRASH: {_e}"
+test("CSV ascii→utf-8: парсинг без краха", _enc_ok)
+test("CSV ascii→utf-8: кириллица в конце читается корректно", _last == "Привет")
+os.unlink(enc_csv)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 42. Авто-создание несуществующей out-dir (json/jsonl/csv)
+# ══════════════════════════════════════════════════════════════════════════════
+
+section("42. parse_file создаёт несуществующую директорию вывода")
+
+outdir_src = os.path.join(TEST_DIR, "_test_outdir_src.csv")
+with open(outdir_src, "w", encoding="utf-8", newline="") as f:
+    f.write("Имя,Возраст\nБоб,30\nАл,25\n")
+
+for _fmt, _ext in (("json", "_parsed.json"), ("jsonl", "_parsed.jsonl")):
+    nested = os.path.join(TEST_DIR, "_test_outdir_new", "nested_dir")
+    shutil.rmtree(os.path.join(TEST_DIR, "_test_outdir_new"), ignore_errors=True)
+    out_path = os.path.join(nested, "result" + _ext)
+    try:
+        p.ExcelParser().parse_file(outdir_src, output_path=out_path, fmt=_fmt)
+        _ok = os.path.isfile(out_path)
+    except Exception as _e:
+        _ok = False
+    test(f"out-dir авто-создаётся ({_fmt})", _ok)
+    shutil.rmtree(os.path.join(TEST_DIR, "_test_outdir_new"), ignore_errors=True)
+
+# streaming json в несуществующую директорию
+nested_s = os.path.join(TEST_DIR, "_test_outdir_stream", "deep")
+shutil.rmtree(os.path.join(TEST_DIR, "_test_outdir_stream"), ignore_errors=True)
+out_path_s = os.path.join(nested_s, "result.json")
+try:
+    p.ExcelParser().parse_file(outdir_src, output_path=out_path_s, fmt="json", streaming=True)
+    _ok_s = os.path.isfile(out_path_s)
+except Exception as _e:
+    _ok_s = False
+test("out-dir авто-создаётся (streaming json)", _ok_s)
+shutil.rmtree(os.path.join(TEST_DIR, "_test_outdir_stream"), ignore_errors=True)
+
+os.unlink(outdir_src)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 43. v21 регрессии (аудит): dedupe-коллизии, named ranges, underscore, None-границы
+# ══════════════════════════════════════════════════════════════════════════════
+
+section("43. v21 аудит: dedupe, named ranges, underscore, whole-column")
+
+# -- Bug: сгенерированный суффикс коллизирует с явным заголовком → дубликат --
+_dd = p._dedupe_headers(["Name", "Name", "Name_2"])
+test("dedupe ['Name','Name','Name_2'] уникален", len(set(_dd)) == 3)
+test("dedupe длина сохранена", len(_dd) == 3)
+# регресс-гарды для существующего поведения
+test("dedupe regress: Сумма*3", p._dedupe_headers(["Сумма", "Сумма", "Сумма"]) == ["Сумма", "Сумма_2", "Сумма_3"])
+test("dedupe regress: mixed", p._dedupe_headers(["A", "B", "A", "C", "B"]) == ["A", "B", "A_2", "C", "B_2"])
+test("dedupe regress: uniqueness*5", len(set(p._dedupe_headers(["Цена"] * 5))) == 5)
+
+# end-to-end: данные не теряются при коллизии заголовков
+dup_xlsx = os.path.join(TEST_DIR, "_test_dup_hdr.xlsx")
+wb = openpyxl.Workbook(); ws = wb.active
+ws.append(["Name", "Name", "Name_2"]); ws.append([1, 2, 3]); ws.append([4, 5, 6]); ws.append([7, 8, 9])
+wb.save(dup_xlsx); wb.close()
+_res = p.ExcelParser().parse_file(dup_xlsx)
+_t = _res["tables_data"][0]
+test("dup-headers: 3 колонки", len(_t["columns"]) == 3)
+test("dup-headers: строка содержит 3 значения", len(_t["rows"][0]) == 3)
+test("dup-headers: значения {1,2,3} не потеряны", set(_t["rows"][0].values()) == {1, 2, 3})
+os.unlink(dup_xlsx)
+
+# -- Bug: named ranges не извлекаются из .xlsx (openpyxl 3.1 DefinedNameDict) --
+from openpyxl.workbook.defined_name import DefinedName
+nr_xlsx = os.path.join(TEST_DIR, "_test_named_range.xlsx")
+wb = openpyxl.Workbook(); ws = wb.active; ws.title = "Data"
+for r, (a, b) in enumerate([("Продукт", "Кол"), ("яблоко", 10), ("груша", 20), ("слива", 30)], start=5):
+    ws.cell(r, 5, a); ws.cell(r, 6, b)
+wb.defined_names.add(DefinedName("SalesTbl", attr_text="Data!$E$5:$F$8"))
+wb.save(nr_xlsx); wb.close()
+
+wb_chk = openpyxl.load_workbook(nr_xlsx)
+amap = {a.name: a for a in p.load_sheets(nr_xlsx)}
+_nr = p.ExcelParser()._extract_named_ranges_from_wb(wb_chk, amap)
+test("named ranges извлекаются из xlsx (>=1)", len(_nr) >= 1)
+for _a in amap.values():
+    if isinstance(_a, p.OpenpyxlAdapter):
+        _a.close()
+wb_chk.close()
+
+_res_nr = p.ExcelParser().parse_file(nr_xlsx)
+_srcs = {t["source"] for t in _res_nr["tables_data"]}
+test("named_range присутствует как источник", "named_range" in _srcs)
+os.unlink(nr_xlsx)
+
+# -- Bug: underscore как разделитель цифр (PEP 515) портит коды --
+test("coerce '1_000' → строка", p._coerce_csv_value("1_000") == "1_000")
+test("coerce '99_99' → строка", p._coerce_csv_value("99_99") == "99_99")
+test("coerce '1_000.5' → строка", p._coerce_csv_value("1_000.5") == "1_000.5")
+test("coerce '1_000_000' → строка", p._coerce_csv_value("1_000_000") == "1_000_000")
+
+# -- Bug: whole-column named range (A:B) → None-границы → краш _parse_range --
+wc_xlsx = os.path.join(TEST_DIR, "_test_wholecol.xlsx")
+wb = openpyxl.Workbook(); ws = wb.active; ws.title = "WC"
+ws.append(["Город", "Население"]); ws.append(["Москва", 13]); ws.append(["Питер", 5])
+wb.save(wc_xlsx); wb.close()
+_wc_adapters = p.load_sheets(wc_xlsx)
+_wc_ad = _wc_adapters[0]
+try:
+    _wc_parsed = p.ExcelParser()._parse_range(_wc_ad, None, None, 1, 2, p.TABLE_SOURCE_NAMED, "WholeCol")
+    _wc_ok = True
+except Exception:
+    _wc_ok = False
+test("_parse_range с None-границами не падает", _wc_ok)
+test("_parse_range с None-границами извлекает данные", _wc_ok and _wc_parsed is not None and len(_wc_parsed["rows"]) == 2)
+if isinstance(_wc_ad, p.OpenpyxlAdapter):
+    _wc_ad.close()
+os.unlink(wc_xlsx)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # ИТОГО
 # ══════════════════════════════════════════════════════════════════════════════
 
