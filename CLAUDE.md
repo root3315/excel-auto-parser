@@ -18,6 +18,10 @@ python excel_smart_parser.py file.xlsx --format jsonl --stream --out-dir output/
 
 # Run tests (150 unit tests)
 python TEST/test_all_features.py
+
+# Rebuild the PDF source-code listing (DOCS/excel_smart_parser_source_code.pdf)
+pip install reportlab pygments
+python tools/generate_code_pdf.py
 ```
 
 ## Architecture

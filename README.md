@@ -242,11 +242,42 @@ excel_smart_parser/
 ├── README.md               # Эта документация
 ├── CLAUDE.md               # Контекст для Claude Code
 ├── DOCS/
-│   └── EXCEL_VIEWER.md     # Тех. документация веб-просмотрщика
+│   ├── EXCEL_VIEWER.md     # Тех. документация веб-просмотрщика
+│   ├── TECHNICAL.md        # Внутреннее устройство парсера
+│   └── excel_smart_parser_source_code.pdf  # PDF-листинг всего кода (50 стр.)
 ├── TEST/
 │   └── test_all_features.py  # 257 тестов всех функций
+├── tools/
+│   └── generate_code_pdf.py  # Сборщик PDF-листинга исходников
 └── excel_viewer/
     └── index.html          # Веб-просмотрщик результатов
+```
+
+---
+
+## 📄 PDF-листинг исходного кода
+
+Весь код проекта собирается в один PDF-документ (`DOCS/excel_smart_parser_source_code.pdf`,
+50 страниц): обложка со статистикой и SHA-256, содержание с номерами страниц, подсветка
+синтаксиса, нумерация строк, колонтитулы и закладки для навигации.
+
+```cmd
+pip install reportlab pygments
+python tools/generate_code_pdf.py
+```
+
+| Аргумент | Значение | По умолчанию |
+|---|---|---|
+| `--out PATH` | Путь к итоговому PDF | `DOCS/excel_smart_parser_source_code.pdf` |
+| `--file PATH` | Добавить файл в листинг (можно повторять) | парсер + тесты + просмотрщик |
+| `--target-pages MIN MAX` | Желаемый объём — кегль подбирается автоматически | `30 50` |
+| `--font-size N` | Фиксированный кегль (отключает авто-подбор) | авто |
+| `--page-size a4\|letter` | Формат страницы | `a4` |
+| `--style NAME` | Цветовая схема Pygments | `default` |
+
+```cmd
+:: только парсер, книжный формат Letter, крупный кегль
+python tools/generate_code_pdf.py --file excel_smart_parser.py --page-size letter --font-size 9
 ```
 
 ---
